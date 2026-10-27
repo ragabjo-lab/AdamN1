@@ -1,0 +1,675 @@
+import os
+import shutil
+import subprocess
+from datetime import datetime
+import pandas as pd
+import customtkinter as ctk
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
+
+# مكتبات ReportLab لتصميم الـ PDF
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+# مكتبات معالجة النص العربي
+import arabic_reshaper
+from bidi.algorithm import get_display
+
+# ضبط المظهر العام
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+
+class RKYNApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("برنامج RKYN - إدارة تسجيل الطلاب")
+        self.geometry("1150x920")
+
+        # إعداد مسارات الملفات
+        self.excel_file = "RKYN_Database.xlsx"
+        self.attachments_folder = "RKYN_Attachments"
+        self.photos_folder = "RKYN_Student_Photos"
+        self.logo_path = "logo.png"
+        
+        self.selected_edit_index = None
+        self.current_attachment_path = ""
+        self.current_photo_path = ""
+        self.student_photo_image = None
+        
+        self.init_environment()
+        self.create_widgets()
+        self.load_table_data()
+
+    def init_environment(self):
+        if not os.path.exists(self.attachments_folder):
+            os.makedirs(self.attachments_folder)
+        if not os.path.exists(self.photos_folder):
+            os.makedirs(self.photos_folder)
+        
+        if not os.path.exists(self.excel_file):
+            df = pd.DataFrame(columns=[
+                "م", "اسم الطالب", "تاريخ الميلاد", "العمر الحالي", 
+                "تاريخ التقديم", "مدة التقديم", "رقم هاتف ولي الأمر", 
+                "المبلغ المدفوع", "حالة الدفع", "مسار المرفق", "مسار الصورة"
+            ])
+            df.to_excel(self.excel_file, index=False)
+        else:
+            df = pd.read_excel(self.excel_file)
+            if "مسار الصورة" not in df.columns:
+                df["مسار الصورة"] = ""
+                df.to_excel(self.excel_file, index=False)
+
+    def create_widgets(self):
+        # 1. العنوان الرئيسي
+        title_label = ctk.CTkLabel(self, text="نظام RKYN لإدارة المتقدمين", font=("CAIRO", 24, "bold"))
+        title_label.pack(pady=8)
+
+        # 2. شريط البحث والأزرار المرفقة
+        search_frame = ctk.CTkFrame(self)
+        search_frame.pack(fill="x", padx=15, pady=4)
+
+        self.search_entry = ctk.CTkEntry(search_frame, placeholder_text="ابحث باسم الطالب أو رقم الهاتف...", font=("CAIRO", 14, "bold"), justify="right")
+        self.search_entry.pack(side="right", padx=8, pady=8, expand=True, fill="x")
+        self.search_entry.bind("<KeyRelease>", self.filter_table)
+
+        btn_box = ctk.CTkFrame(search_frame, fg_color="transparent")
+        btn_box.pack(side="left", padx=5)
+
+        ctk.CTkButton(btn_box, text="تعديل", font=("CAIRO", 13, "bold"), fg_color="#ffc107", text_color="black", width=80, command=self.edit_student).pack(side="left", padx=2)
+        ctk.CTkButton(btn_box, text="حذف", font=("CAIRO", 13, "bold"), fg_color="#dc3545", width=80, command=self.delete_student).pack(side="left", padx=2)
+        ctk.CTkButton(btn_box, text="عرض المرفق", font=("CAIRO", 13, "bold"), fg_color="#6c757d", width=100, command=self.open_attachment).pack(side="left", padx=2)
+        ctk.CTkButton(btn_box, text="تغيير المرفق", font=("CAIRO", 13, "bold"), fg_color="#17a2b8", width=100, command=self.change_attachment).pack(side="left", padx=2)
+        ctk.CTkButton(btn_box, text="معاينة وطباعة PDF", font=("CAIRO", 13, "bold"), fg_color="#0d6efd", width=130, command=self.show_print_options).pack(side="left", padx=2)
+
+        # 3. إطار إدخال البيانات المنظم
+        input_container = ctk.CTkFrame(self)
+        input_container.pack(fill="x", padx=15, pady=4)
+
+        # إطار الحقول (يمين)
+        input_frame = ctk.CTkFrame(input_container, fg_color="transparent")
+        input_frame.pack(side="right", fill="both", expand=True, padx=2, pady=2)
+
+        # إطار صورة الطالب (يسار أماكن الإدخال وفوق المسلسل)
+        photo_outer_frame = ctk.CTkFrame(input_container, fg_color="transparent")
+        photo_outer_frame.pack(side="left", padx=10, pady=2)
+
+        ctk.CTkLabel(photo_outer_frame, text="صورة الطالب", font=("CAIRO", 11, "bold")).pack(pady=1)
+        
+        self.photo_frame = ctk.CTkFrame(photo_outer_frame, width=110, height=130, corner_radius=6, border_width=2, border_color="#3B8ED0")
+        self.photo_frame.pack(pady=1)
+        self.photo_frame.pack_propagate(False)
+
+        self.photo_preview_label = ctk.CTkLabel(self.photo_frame, text="لا توجد صورة", font=("CAIRO", 10))
+        self.photo_preview_label.pack(expand=True)
+
+        ctk.CTkButton(photo_outer_frame, text="اختر الصورة", font=("CAIRO", 11, "bold"), width=110, height=26, command=self.upload_student_photo).pack(pady=3)
+
+        # --- عناصر إدخال البيانات بمسافة صفرية بين العنوان وحقل الإدخال ---
+        self.lbl_title = ctk.CTkLabel(input_frame, text="إدخال طالب جديد", font=("CAIRO", 15, "bold"))
+        self.lbl_title.grid(row=0, column=0, columnspan=2, padx=2, pady=4, sticky="e")
+
+        # 1. اسم الطالب
+        f_name = ctk.CTkFrame(input_frame, fg_color="transparent")
+        f_name.grid(row=1, column=1, sticky="ew", padx=4, pady=3)
+        ctk.CTkLabel(f_name, text="اسم الطالب:", font=("CAIRO", 12, "bold")).pack(side="right", padx=0)
+        self.name_entry = ctk.CTkEntry(f_name, placeholder_text="أدخل اسم الطالب الكامل", justify="right", font=("CAIRO", 13, "bold"))
+        self.name_entry.pack(side="left", fill="x", expand=True, padx=0)
+
+        # 2. تاريخ الميلاد
+        f_dob = ctk.CTkFrame(input_frame, fg_color="transparent")
+        f_dob.grid(row=1, column=0, sticky="ew", padx=4, pady=3)
+        ctk.CTkLabel(f_dob, text="تاريخ الميلاد:", font=("CAIRO", 12, "bold")).pack(side="right", padx=0)
+        self.dob_entry = ctk.CTkEntry(f_dob, placeholder_text="DD/MM/YYYY", justify="right", font=("CAIRO", 13, "bold"))
+        self.dob_entry.pack(side="left", fill="x", expand=True, padx=0)
+        self.dob_entry.bind("<KeyRelease>", self.calculate_age)
+
+        # العمر تلقائياً
+        self.age_label = ctk.CTkLabel(input_frame, text="السن تلقائياً: --", font=("CAIRO", 11, "bold"), text_color="blue")
+        self.age_label.grid(row=2, column=0, sticky="e", padx=4, pady=1)
+
+        # 3. تاريخ التقديم
+        f_app = ctk.CTkFrame(input_frame, fg_color="transparent")
+        f_app.grid(row=3, column=1, sticky="ew", padx=4, pady=3)
+        ctk.CTkLabel(f_app, text="تاريخ التقديم:", font=("CAIRO", 12, "bold")).pack(side="right", padx=0)
+        self.app_date_entry = ctk.CTkEntry(f_app, placeholder_text="DD/MM/YYYY", justify="right", font=("CAIRO", 13, "bold"))
+        self.app_date_entry.insert(0, datetime.now().strftime("%d/%m/%Y"))
+        self.app_date_entry.pack(side="left", fill="x", expand=True, padx=0)
+        self.app_date_entry.bind("<KeyRelease>", self.calculate_app_duration)
+
+        # 4. رقم هاتف ولي الأمر
+        f_phone = ctk.CTkFrame(input_frame, fg_color="transparent")
+        f_phone.grid(row=3, column=0, sticky="ew", padx=4, pady=3)
+        ctk.CTkLabel(f_phone, text="رقم هاتف ولي الأمر:", font=("CAIRO", 12, "bold")).pack(side="right", padx=0)
+        vcmd = (self.register(self.validate_numbers_only), '%P')
+        self.phone_entry = ctk.CTkEntry(f_phone, placeholder_text="01xxxxxxxxx", justify="right", font=("CAIRO", 13, "bold"), validate="key", validatecommand=vcmd)
+        self.phone_entry.pack(side="left", fill="x", expand=True, padx=0)
+
+        # المدة من تاريخ التقديم
+        self.duration_label = ctk.CTkLabel(input_frame, text="المدة من تاريخ التقديم: 0 يوم", font=("CAIRO", 11, "bold"), text_color="blue")
+        self.duration_label.grid(row=4, column=1, sticky="e", padx=4, pady=1)
+
+        # 5. المبلغ المدفوع
+        f_fee = ctk.CTkFrame(input_frame, fg_color="transparent")
+        f_fee.grid(row=5, column=1, sticky="ew", padx=4, pady=3)
+        ctk.CTkLabel(f_fee, text="المبلغ المدفوع:", font=("CAIRO", 12, "bold")).pack(side="right", padx=0)
+        self.fee_entry = ctk.CTkEntry(f_fee, placeholder_text="0.00", justify="right", font=("CAIRO", 13, "bold"))
+        self.fee_entry.pack(side="left", fill="x", expand=True, padx=0)
+        self.fee_entry.bind("<KeyRelease>", self.update_payment_status)
+
+        # 6. زر تحميل المرفق
+        f_att = ctk.CTkFrame(input_frame, fg_color="transparent")
+        f_att.grid(row=5, column=0, sticky="ew", padx=4, pady=3)
+        ctk.CTkLabel(f_att, text="المرفق:", font=("CAIRO", 12, "bold")).pack(side="right", padx=0)
+        self.attach_btn = ctk.CTkButton(f_att, text="تحميل المرفق", font=("CAIRO", 12, "bold"), command=self.upload_attachment)
+        self.attach_btn.pack(side="left", fill="x", expand=True, padx=0)
+
+        # حالة الدفع
+        self.payment_status_label = ctk.CTkLabel(input_frame, text="حالة الدفع: لم يدفع", font=("CAIRO", 11, "bold"), text_color="red")
+        self.payment_status_label.grid(row=6, column=1, sticky="e", padx=4, pady=1)
+
+        # 7. أزرار الحفظ والإلغاء
+        btn_container = ctk.CTkFrame(input_frame, fg_color="transparent")
+        btn_container.grid(row=7, column=0, columnspan=2, sticky="ew", padx=4, pady=8)
+
+        self.save_btn = ctk.CTkButton(btn_container, text="إدخال وحفظ البيانات", font=("CAIRO", 13, "bold"), fg_color="green", command=self.save_data)
+        self.save_btn.pack(side="right", fill="x", expand=True, padx=2)
+
+        self.cancel_btn = ctk.CTkButton(btn_container, text="إلغاء التعديل", font=("CAIRO", 13, "bold"), fg_color="#6c757d", command=self.reset_form)
+        self.cancel_btn.pack(side="left", fill="x", expand=True, padx=2)
+        self.cancel_btn.pack_forget()
+
+        input_frame.columnconfigure((0, 1), weight=1)
+
+        # 4. جدول عرض النتائج والطلاب
+        tbl_frame = ctk.CTkFrame(self)
+        tbl_frame.pack(fill="both", expand=True, padx=15, pady=6)
+
+        style = ttk.Style()
+        style.configure("Treeview.Heading", font=("CAIRO", 12, "bold"))
+        style.configure("Treeview", font=("CAIRO", 11, "bold"), rowheight=26)
+
+        cols = ("m", "name", "dob", "age", "appDate", "duration", "phone", "fee", "status", "attach", "photo")
+        self.tree = ttk.Treeview(tbl_frame, columns=cols, show="headings", height=7)
+        
+        headings = [("m", "م"), ("name", "اسم الطالب"), ("dob", "تاريخ الميلاد"), ("age", "العمر الحالي"), 
+                    ("appDate", "تاريخ التقديم"), ("duration", "مدة التقديم"), ("phone", "الهاتف"), 
+                    ("fee", "المبلغ"), ("status", "الدفع"), ("attach", "المرفق"), ("photo", "الصورة الشخصية")]
+        
+        for col, text in headings:
+            self.tree.heading(col, text=text)
+            self.tree.column(col, anchor="center", width=95)
+        self.tree.column("m", width=40)
+
+        self.tree.pack(fill="both", expand=True, padx=4, pady=4)
+
+    def validate_numbers_only(self, P):
+        return P.isdigit() or P == ""
+
+    def calculate_age(self, event=None):
+        val = self.dob_entry.get().strip()
+        if len(val) == 10:
+            try:
+                dob = datetime.strptime(val, "%d/%m/%Y")
+                today = datetime.now()
+                years = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+                self.age_label.configure(text=f"السن تلقائياً: {years} سنة", text_color="blue")
+            except ValueError:
+                self.age_label.configure(text="الصيغة الصحيحة: DD/MM/YYYY", text_color="red")
+        else:
+            self.age_label.configure(text="السن تلقائياً: --", text_color="blue")
+
+    def calculate_app_duration(self, event=None):
+        val = self.app_date_entry.get().strip()
+        if len(val) == 10:
+            try:
+                app_date = datetime.strptime(val, "%d/%m/%Y")
+                diff = datetime.now() - app_date
+                days = diff.days
+                if days < 0:
+                    days = 0
+                years = days // 365
+                months = (days % 365) // 30
+                rem_days = (days % 365) % 30
+                self.duration_label.configure(text=f"المدة من تاريخ التقديم: {years} سنة و {months} شهر و {rem_days} يوم", text_color="blue")
+            except ValueError:
+                self.duration_label.configure(text="تاريخ التقديم غير صحيح", text_color="red")
+        else:
+            self.duration_label.configure(text="المدة من تاريخ التقديم: 0 يوم", text_color="blue")
+
+    def update_payment_status(self, event=None):
+        val = self.fee_entry.get().strip()
+        if val and val != "0":
+            try:
+                if float(val) > 0:
+                    self.payment_status_label.configure(text="حالة الدفع: دفع", text_color="green")
+                else:
+                    self.payment_status_label.configure(text="حالة الدفع: لم يدفع", text_color="red")
+            except ValueError:
+                self.payment_status_label.configure(text="حالة الدفع: لم يدفع", text_color="red")
+        else:
+            self.payment_status_label.configure(text="حالة الدفع: لم يدفع", text_color="red")
+
+    def upload_attachment(self):
+        file_path = filedialog.askopenfilename(title="اختر ملف المرفق")
+        if file_path:
+            self.current_attachment_path = file_path
+            self.attach_btn.configure(text="تم التحديد", fg_color="green")
+
+    def upload_student_photo(self):
+        file_path = filedialog.askopenfilename(title="اختر صورة الطالب", filetypes=[("Image Files", "*.jpg *.png *.jpeg *.bmp")])
+        if file_path:
+            self.current_photo_path = file_path
+            self.display_photo_preview(file_path)
+
+    def display_photo_preview(self, path):
+        try:
+            img = Image.open(path)
+            img = img.resize((100, 120), Image.Resampling.LANCZOS)
+            self.student_photo_image = ImageTk.PhotoImage(img)
+            self.photo_preview_label.configure(text="", image=self.student_photo_image)
+        except Exception as e:
+            messagebox.showerror("خطأ", f"تعسّر عرض الصورة: {e}")
+
+    def save_data(self):
+        name = self.name_entry.get().strip()
+        dob = self.dob_entry.get().strip()
+        app_date = self.app_date_entry.get().strip()
+        phone = self.phone_entry.get().strip()
+        fee = self.fee_entry.get().strip()
+        status = "دفع" if (fee and fee != "0") else "لم يدفع"
+
+        if not name or not phone or not dob:
+            messagebox.showerror("خطأ", "يرجى ملء كافة الحقول الأساسية (الاسم، الميلاد، الهاتف).")
+            return
+
+        df = pd.read_excel(self.excel_file)
+        saved_attachment_path = ""
+        saved_photo_path = ""
+
+        if self.current_attachment_path and os.path.exists(self.current_attachment_path):
+            ext = os.path.splitext(self.current_attachment_path)[1]
+            new_filename = f"{name}_{phone}{ext}"
+            saved_attachment_path = os.path.join(self.attachments_folder, new_filename)
+            if self.current_attachment_path != saved_attachment_path:
+                shutil.copy(self.current_attachment_path, saved_attachment_path)
+
+        if self.current_photo_path and os.path.exists(self.current_photo_path):
+            ext = os.path.splitext(self.current_photo_path)[1]
+            new_photo_name = f"photo_{name}_{phone}{ext}"
+            saved_photo_path = os.path.join(self.photos_folder, new_photo_name)
+            if self.current_photo_path != saved_photo_path:
+                shutil.copy(self.current_photo_path, saved_photo_path)
+
+        if self.selected_edit_index is not None:
+            if not saved_attachment_path and self.selected_edit_index < len(df):
+                saved_attachment_path = str(df.at[self.selected_edit_index, "مسار المرفق"])
+            if not saved_photo_path and self.selected_edit_index < len(df) and "مسار الصورة" in df.columns:
+                saved_photo_path = str(df.at[self.selected_edit_index, "مسار الصورة"])
+            
+            df.at[self.selected_edit_index, "اسم الطالب"] = name
+            df.at[self.selected_edit_index, "تاريخ الميلاد"] = dob
+            df.at[self.selected_edit_index, "العمر الحالي"] = self.age_label.cget("text").replace("السن تلقائياً: ", "")
+            df.at[self.selected_edit_index, "تاريخ التقديم"] = app_date
+            df.at[self.selected_edit_index, "مدة التقديم"] = self.duration_label.cget("text").replace("المدة من تاريخ التقديم: ", "")
+            df.at[self.selected_edit_index, "رقم هاتف ولي الأمر"] = phone
+            df.at[self.selected_edit_index, "المبلغ المدفوع"] = fee if fee else "0"
+            df.at[self.selected_edit_index, "حالة الدفع"] = status
+            df.at[self.selected_edit_index, "مسار المرفق"] = saved_attachment_path
+            df.at[self.selected_edit_index, "مسار الصورة"] = saved_photo_path
+
+            messagebox.showinfo("نجاح", "تم تحديث بيانات الطالب بنجاح!")
+        else:
+            new_row = {
+                "م": len(df) + 1,
+                "اسم الطالب": name,
+                "تاريخ الميلاد": dob,
+                "العمر الحالي": self.age_label.cget("text").replace("السن تلقائياً: ", ""),
+                "تاريخ التقديم": app_date,
+                "مدة التقديم": self.duration_label.cget("text").replace("المدة من تاريخ التقديم: ", ""),
+                "رقم هاتف ولي الأمر": phone,
+                "المبلغ المدفوع": fee if fee else "0",
+                "حالة الدفع": status,
+                "مسار المرفق": saved_attachment_path,
+                "مسار الصورة": saved_photo_path
+            }
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            messagebox.showinfo("تم الحفظ", "تم حفظ بيانات الطالب والصورة بنجاح!")
+
+        df.to_excel(self.excel_file, index=False)
+        self.reset_form()
+        self.load_table_data()
+
+    def reset_form(self):
+        self.name_entry.delete(0, 'end')
+        self.dob_entry.delete(0, 'end')
+        self.phone_entry.delete(0, 'end')
+        self.fee_entry.delete(0, 'end')
+        self.current_attachment_path = ""
+        self.current_photo_path = ""
+        self.student_photo_image = None
+        self.photo_preview_label.configure(image="", text="لا توجد صورة")
+        self.selected_edit_index = None
+        self.attach_btn.configure(text="تحميل المرفق", fg_color=["#3B8ED0", "#1F6AA5"])
+        self.cancel_btn.pack_forget()
+        self.save_btn.configure(text="إدخال وحفظ البيانات", fg_color="green")
+        self.lbl_title.configure(text="إدخال طالب جديد")
+        self.payment_status_label.configure(text="حالة الدفع: لم يدفع", text_color="red")
+        self.age_label.configure(text="السن تلقائياً: --", text_color="blue")
+        self.duration_label.configure(text="المدة من تاريخ التقديم: 0 يوم", text_color="blue")
+
+    def load_table_data(self):
+        for r in self.tree.get_children(): 
+            self.tree.delete(r)
+        if os.path.exists(self.excel_file):
+            df = pd.read_excel(self.excel_file)
+            for idx, r in df.iterrows():
+                att_path = str(r['مسار المرفق']) if pd.notna(r['مسار المرفق']) else ""
+                att = os.path.basename(att_path) if att_path and os.path.exists(att_path) else "بدون"
+                
+                photo_path = str(r['مسار الصورة']) if "مسار الصورة" in df.columns and pd.notna(r['مسار الصورة']) else ""
+                photo_status = "يوجد" if photo_path and os.path.exists(photo_path) else "بدون"
+
+                self.tree.insert("", "end", iid=str(idx), values=(
+                    idx + 1, 
+                    str(r['اسم الطالب']), 
+                    r['تاريخ الميلاد'], 
+                    r['العمر الحالي'], 
+                    r['تاريخ التقديم'], 
+                    r['مدة التقديم'], 
+                    r['رقم هاتف ولي الأمر'], 
+                    r['المبلغ المدفوع'], 
+                    str(r['حالة الدفع']), 
+                    att,
+                    photo_status
+                ))
+
+    def filter_table(self, event=None):
+        query = self.search_entry.get().strip().lower()
+        for r in self.tree.get_children(): 
+            self.tree.delete(r)
+        if os.path.exists(self.excel_file):
+            df = pd.read_excel(self.excel_file)
+            for idx, r in df.iterrows():
+                if query in str(r['اسم الطالب']).lower() or query in str(r['رقم هاتف ولي الأمر']):
+                    att_path = str(r['مسار المرفق']) if pd.notna(r['مسار المرفق']) else ""
+                    att = os.path.basename(att_path) if att_path and os.path.exists(att_path) else "بدون"
+                    
+                    photo_path = str(r['مسار الصورة']) if "مسار الصورة" in df.columns and pd.notna(r['مسار الصورة']) else ""
+                    photo_status = "يوجد" if photo_path and os.path.exists(photo_path) else "بدون"
+
+                    self.tree.insert("", "end", iid=str(idx), values=(
+                        idx + 1, 
+                        str(r['اسم الطالب']), 
+                        r['تاريخ الميلاد'], 
+                        r['العمر الحالي'], 
+                        r['تاريخ التقديم'], 
+                        r['مدة التقديم'], 
+                        r['رقم هاتف ولي الأمر'], 
+                        r['المبلغ المدفوع'], 
+                        str(r['حالة الدفع']), 
+                        att,
+                        photo_status
+                    ))
+
+    def edit_student(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "يرجى اختيار طالب من الجدول أولاً للتعديل.")
+            return
+
+        idx = int(sel[0])
+        self.selected_edit_index = idx
+
+        df = pd.read_excel(self.excel_file)
+        if idx >= len(df):
+            return
+
+        r = df.iloc[idx]
+
+        self.name_entry.delete(0, 'end')
+        self.name_entry.insert(0, str(r['اسم الطالب']))
+
+        self.dob_entry.delete(0, 'end')
+        self.dob_entry.insert(0, str(r['تاريخ الميلاد']))
+
+        self.app_date_entry.delete(0, 'end')
+        self.app_date_entry.insert(0, str(r['تاريخ التقديم']))
+
+        self.phone_entry.delete(0, 'end')
+        self.phone_entry.insert(0, str(r['رقم هاتف ولي الأمر']))
+
+        self.fee_entry.delete(0, 'end')
+        self.fee_entry.insert(0, str(r['المبلغ المدفوع']))
+
+        if "مسار الصورة" in df.columns and pd.notna(r['مسار الصورة']) and os.path.exists(str(r['مسار الصورة'])):
+            self.current_photo_path = str(r['مسار الصورة'])
+            self.display_photo_preview(self.current_photo_path)
+        else:
+            self.current_photo_path = ""
+            self.photo_preview_label.configure(image="", text="لا توجد صورة")
+
+        self.calculate_age()
+        self.calculate_app_duration()
+        self.update_payment_status()
+
+        self.cancel_btn.pack(side="left", fill="x", expand=True, padx=2)
+        self.save_btn.configure(text="تحديث البيانات", fg_color="#ffc107")
+        self.lbl_title.configure(text=f"تعديل بيانات: {r['اسم الطالب']}")
+
+    def delete_student(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "يرجى تحديد طالب من الجدول للحذف.")
+            return
+        idx = int(sel[0])
+        df = pd.read_excel(self.excel_file)
+        if messagebox.askyesno("تأكيد", "هل أنت متأكد من حذف بيانات هذا الطالب؟"):
+            df = df.drop(idx).reset_index(drop=True)
+            df['م'] = df.index + 1
+            df.to_excel(self.excel_file, index=False)
+            self.load_table_data()
+
+    def change_attachment(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "يرجى تحديد طالب لإضافة أو تغيير المرفق.")
+            return
+        idx = int(sel[0])
+        file_path = filedialog.askopenfilename(title="اختر المرفق الجديد")
+        if file_path:
+            df = pd.read_excel(self.excel_file)
+            ext = os.path.splitext(file_path)[1]
+            p = os.path.join(self.attachments_folder, f"{df.iloc[idx]['اسم الطالب']}_{df.iloc[idx]['رقم هاتف ولي الأمر']}{ext}")
+            shutil.copy(file_path, p)
+            df.at[idx, "مسار المرفق"] = p
+            df.to_excel(self.excel_file, index=False)
+            self.load_table_data()
+            messagebox.showinfo("نجاح", "تم تغيير المرفق بنجاح!")
+
+    def open_attachment(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "يرجى تحديد طالب لعرض مرفقاته.")
+            return
+        df = pd.read_excel(self.excel_file)
+        idx = int(sel[0])
+        p = str(df.iloc[idx]['مسار المرفق']) if pd.notna(df.iloc[idx]['مسار المرفق']) else ""
+        
+        if p and os.path.exists(p): 
+            os.startfile(p) if os.name == 'nt' else subprocess.call(['open', p])
+        else:
+            messagebox.showinfo("تنبيه", "لا يوجد مرفق لهذا الطالب أو المسار غير موجود.")
+
+    def format_ar(self, text):
+        if not text or pd.isna(text):
+            return ""
+        text_str = str(text)
+        reshaped_text = arabic_reshaper.reshape(text_str)
+        bidi_text = get_display(reshaped_text)
+        return bidi_text
+
+    def show_print_options(self):
+        win = ctk.CTkToplevel(self)
+        win.title("خيارات المعاينة والطباعة")
+        win.geometry("400x220")
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="اختر نوع خيار المعاينة المطلوب:", font=("CAIRO", 14, "bold")).pack(pady=20)
+
+        btn_single = ctk.CTkButton(win, text="معاينة استمارة الطالب المحدد", font=("CAIRO", 12, "bold"), fg_color="#0d6efd", command=lambda: [win.destroy(), self.print_arabic_pdf()])
+        btn_single.pack(pady=6, fill="x", padx=30)
+
+        btn_all = ctk.CTkButton(win, text="معاينة قائمة جميع الطلاب", font=("CAIRO", 12, "bold"), fg_color="#198754", command=lambda: [win.destroy(), self.print_all_pdf()])
+        btn_all.pack(pady=6, fill="x", padx=30)
+
+    def print_arabic_pdf(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("تنبيه", "يرجى اختيار طالب من الجدول أولاً للطباعة.")
+            return
+
+        df = pd.read_excel(self.excel_file)
+        r = df.iloc[int(sel[0])]
+        name = str(r['اسم الطالب'])
+        pdf_filename = f"استمارة_{name}.pdf"
+        
+        font_path = "C:\\Windows\\Fonts\\arial.ttf"
+        if os.path.exists(font_path):
+            pdfmetrics.registerFont(TTFont('ArabicFont', font_path))
+            font_name = 'ArabicFont'
+        else:
+            font_name = 'Helvetica'
+
+        c = canvas.Canvas(pdf_filename, pagesize=A4)
+        width, height = A4
+
+        if os.path.exists(self.logo_path):
+            c.drawImage(self.logo_path, 40, height - 100, width=80, height=80, preserveAspectRatio=True)
+
+        if "مسار الصورة" in df.columns and pd.notna(r['مسار الصورة']) and os.path.exists(str(r['مسار الصورة'])):
+            try:
+                c.drawImage(str(r['مسار الصورة']), width - 130, height - 100, width=80, height=90, preserveAspectRatio=True)
+                c.rect(width - 132, height - 102, 84, 94, stroke=1, fill=0)
+            except Exception:
+                pass
+
+        c.setFont(font_name, 20)
+        c.drawRightString(width - 140, height - 60, self.format_ar("نظام RKYN لإدارة تسجيل الطلاب"))
+        
+        c.setFont(font_name, 12)
+        c.drawRightString(width - 140, height - 85, self.format_ar("استمارة تقديم وإيصال تسليم بيانات"))
+        
+        c.setStrokeColorRGB(0.2, 0.4, 0.8)
+        c.setLineWidth(2)
+        c.line(40, height - 115, width - 40, height - 115)
+
+        y = height - 165
+        data_items = [
+            ("اسم الطالب", r['اسم الطالب']),
+            ("تاريخ الميلاد", r['تاريخ الميلاد']),
+            ("العمر الحالي", r['العمر الحالي']),
+            ("تاريخ التقديم", r['تاريخ التقديم']),
+            ("المدة منذ التقديم", r['مدة التقديم']),
+            ("رقم هاتف ولي الأمر", r['رقم هاتف ولي الأمر']),
+            ("المبلغ المدفوع", f"{r['المبلغ المدفوع']} جنيه"),
+            ("حالة الدفع", r['حالة الدفع'])
+        ]
+
+        c.setFont(font_name, 12)
+        for label, val in data_items:
+            c.setFillColorRGB(0.95, 0.95, 0.95)
+            c.rect(40, y - 5, width - 80, 25, fill=1, stroke=0)
+
+            c.setFillColorRGB(0, 0, 0)
+            c.drawRightString(width - 60, y, self.format_ar(f"{label}:"))
+            c.drawString(60, y, self.format_ar(str(val)))
+            y -= 35
+
+        c.setLineWidth(1)
+        c.line(40, 100, width - 40, 100)
+        c.setFont(font_name, 11)
+        c.drawRightString(width - 60, 70, self.format_ar("توقيع ولي الأمر: .........................."))
+        c.drawString(60, 70, self.format_ar("ختم واستلام المسؤول: .........................."))
+
+        c.save()
+        
+        os.startfile(pdf_filename) if os.name == 'nt' else subprocess.call(['open', pdf_filename])
+
+    def print_all_pdf(self):
+        if not os.path.exists(self.excel_file):
+            return
+
+        df = pd.read_excel(self.excel_file)
+        if df.empty:
+            messagebox.showwarning("تنبيه", "لا توجد بيانات طلاب لطباعتها.")
+            return
+
+        pdf_filename = "تقرير_قائمة_الطلاب_الشاملة.pdf"
+        font_path = "C:\\Windows\\Fonts\\arial.ttf"
+        font_name = 'ArabicFont' if os.path.exists(font_path) else 'Helvetica'
+        if os.path.exists(font_path): 
+            pdfmetrics.registerFont(TTFont('ArabicFont', font_path))
+
+        c = canvas.Canvas(pdf_filename, pagesize=landscape(A4))
+        w, h = landscape(A4)
+
+        c.setFont(font_name, 18)
+        c.drawRightString(w - 40, h - 40, self.format_ar("تقرير قائمة الطلاب المسجلين - RKYN"))
+        
+        c.setFont(font_name, 10)
+        report_date_str = f"{datetime.now().strftime('%d/%m/%Y')} {self.format_ar('تاريخ التقرير:')}"
+        c.drawString(40, h - 40, report_date_str)
+
+        c.setLineWidth(1)
+        c.line(40, h - 50, w - 40, h - 50)
+
+        y = h - 80
+        c.setFillColorRGB(0.12, 0.23, 0.44)
+        c.rect(40, y, w - 80, 25, fill=1, stroke=0)
+        c.setFillColorRGB(1, 1, 1)
+        c.setFont(font_name, 10)
+
+        cols_pos = [(50, "م"), (90, "اسم الطالب"), (220, "تاريخ الميلاد"), (300, "العمر"), 
+                    (380, "تاريخ التقديم"), (480, "المدة"), (580, "الهاتف"), (680, "المبلغ"), (730, "الدفع"), (780, "الصورة")]
+
+        for pos, title in cols_pos:
+            c.drawString(pos, y + 7, self.format_ar(title))
+
+        y -= 25
+        c.setFillColorRGB(0, 0, 0)
+
+        for idx, r in df.iterrows():
+            if y < 40:
+                c.showPage()
+                y = h - 50
+
+            if idx % 2 == 0:
+                c.setFillColorRGB(0.95, 0.95, 0.95)
+                c.rect(40, y, w - 80, 20, fill=1, stroke=0)
+                c.setFillColorRGB(0, 0, 0)
+
+            photo_status = "يوجد" if "مسار الصورة" in df.columns and pd.notna(r['مسار الصورة']) and os.path.exists(str(r['مسار الصورة'])) else "بدون"
+
+            c.drawString(50, y + 5, str(idx + 1))
+            c.drawString(90, y + 5, self.format_ar(str(r['اسم الطالب']))[:20])
+            c.drawString(220, y + 5, str(r['تاريخ الميلاد']))
+            c.drawString(300, y + 5, self.format_ar(str(r['العمر الحالي'])))
+            c.drawString(380, y + 5, str(r['تاريخ التقديم']))
+            c.drawString(480, y + 5, self.format_ar(str(r['مدة التقديم']))[:20])
+            c.drawString(580, y + 5, str(r['رقم هاتف ولي الأمر']))
+            c.drawString(680, y + 5, str(r['المبلغ المدفوع']))
+            c.drawString(730, y + 5, self.format_ar(str(r['حالة الدفع'])))
+            c.drawString(780, y + 5, self.format_ar(photo_status))
+
+            y -= 22
+
+        c.save()
+        
+        os.startfile(pdf_filename) if os.name == 'nt' else subprocess.call(['open', pdf_filename])
+
+if __name__ == "__main__":
+    app = RKYNApp()
+    app.mainloop()
